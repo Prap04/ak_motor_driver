@@ -1,0 +1,13 @@
+//std::uint8_t-Its an 8-bit unsigned integer type that can hold values from 0 to 255. It is used to represent the motor ID and error code in the MotorState structure even 0x00 and 0xFF are valid values.
+//std::uint16_t-Its a 16-bit unsigned integer type that can hold values from 0 to 65535.
+
+float uses 32 bits to represent a floating point number,
+while double uses 64 bits. 
+Double provides higher precision and a larger range of representable values compared to float. 
+In this code, double is used for position, velocity, torque, and temperature to ensure accurate representation of these values.
+
+enum creates a custom data type whose value is restricted to a set of named constants.
+instead of using raw numbers like 0 or 1 to represent different error states, the code defines an enum class called Error.
+This enum class defines a set of named constants that represent different error states, such as none, already_connected, not_connected, invalid_range, socket_create_failed, interface_lookup_failed, bind_failed,
+
+12 bit boundary do not land neatly on 8-bit byte boundary we use slice and merge them into an array of 8 bytes to send over the CAN bus. The first byte is used for the motor ID, and the last byte is used for the error code. The remaining 6 bytes are used to store the position, velocity, kp, kd, and torque values.

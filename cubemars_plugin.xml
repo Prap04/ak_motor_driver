@@ -1,0 +1,5 @@
+<library path="cubemars_ros2_control">
+  <class name="cubemars/CubeMarsSystem" type="cubemars::CubeMarsSystem" base_class_type="hardware_interface::SystemInterface">
+    <description>CubeMars AK10-9 MIT SocketCAN hardware interface</description>
+  </class>
+</library>

@@ -1,0 +1,9 @@
+# Request: which motor to switch
+uint8 motor_id
+
+---
+
+# Response: success/failure
+bool success
+uint8 error_code
+string message
