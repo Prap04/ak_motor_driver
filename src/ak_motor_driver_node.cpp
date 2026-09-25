@@ -31,11 +31,16 @@ public:
     this->declare_parameter("motor_ids", std::vector<int64_t>{1});
     this->declare_parameter("publish_rate_hz", 50.0);
     this->declare_parameter("kd", 1.0);
+    this->declare_parameter("command_timeout_s", 0.5);
+    this->declare_parameter("max_consecutive_failures", 5);
 
     const auto can_interface = this->get_parameter("can_interface").as_string();
     const auto motor_ids = this->get_parameter("motor_ids").as_integer_array();
     const auto publish_rate_hz = this->get_parameter("publish_rate_hz").as_double();
     const double kd = this->get_parameter("kd").as_double();
+    command_timeout_s_ = this->get_parameter("command_timeout_s").as_double();
+    max_consecutive_failures_ = this->get_parameter("max_consecutive_failures").as_int();
+    last_command_time_ = this->now();
 
     for (const auto & motor_id : motor_ids) {
       const auto id = static_cast<std::uint8_t>(motor_id);
@@ -50,7 +55,7 @@ public:
       motor.setZero();
       last_kd_[id] = kd;
     }
-
+  
     command_sub_ = this->create_subscription<MotorCommandArray>(
       "motor_commands",
       10,
@@ -85,6 +90,12 @@ public:
 private:
   void commandCallback(const MotorCommandArray::SharedPtr msg)
   {
+    last_command_time_ = this->now();
+    if (command_watchdog_triggered_) {
+      RCLCPP_INFO(this->get_logger(), "Command watchdog cleared");
+      command_watchdog_triggered_ = false;
+    }
+
     for (const auto & command : msg->commands) {
       const auto motor_id = static_cast<std::uint8_t>(command.motor_id);
       auto it = motors_.find(motor_id);
@@ -109,77 +120,80 @@ private:
       }
     }
   }
-void publishState()
-{
-  MotorStateArray msg;
 
-  for (const auto & [motor_id, motor] : motors_) {
-
-    // Send a very small velocity command: 2 RPM
-    constexpr double test_velocity_rad_s = 0.209;
-    constexpr double test_kd = 1.0;
-
-    const auto command_error =
-      motor->setVelocityCommand(test_velocity_rad_s, test_kd);
-
-    if (command_error != cubemars::Error::none) {
-      RCLCPP_WARN(
-        this->get_logger(),
-        "Motor %u command failed: %s",
-        motor_id,
-        motor->lastErrorMessage().c_str());
-      continue;
-    }
-
-    cubemars::MotorState state;
-
-    const auto error = motor->readState(state);
-
-    if (error != cubemars::Error::none || !state.valid) {
-      RCLCPP_WARN_THROTTLE(
-        this->get_logger(),
-        *this->get_clock(),
-        1000,
-        "Motor %u read failed: %s",
-        motor_id,
-        motor->lastErrorMessage().c_str());
-      continue;
-    }
-
-    // Print successful feedback
-    RCLCPP_INFO(
-      this->get_logger(),
-      "Motor %u | Position: %.3f rad | Velocity: %.3f rad/s | Torque: %.3f Nm | Temp: %.1f C",
-      motor_id,
-      state.position_rad,
-      state.velocity_rad_per_s,
-      state.torque_nm,
-      state.temperature_c);
-
-    ak_motor_driver::msg::MotorState motor_state;
-
-    motor_state.motor_id = state.motor_id;
-    motor_state.position_rad = state.position_rad;
-    motor_state.velocity_rad_per_s = state.velocity_rad_per_s;
-    motor_state.torque_nm = state.torque_nm;
-    motor_state.temperature_c = state.temperature_c;
-    motor_state.error = state.error;
-    motor_state.valid = state.valid;
-
-    msg.states.push_back(motor_state);
+  void safeStop(cubemars::CubeMarsMotor & motor, std::uint8_t motor_id, double kd)
+  {
+    motor.setVelocityCommand(0.0, kd);
+    RCLCPP_WARN(this->get_logger(), "Safety stop issued to motor %u", motor_id);
   }
 
-  if (!msg.states.empty()) {
-    state_pub_->publish(msg);
+  void publishState()
+  {
+    MotorStateArray msg;
+    const double since_last_command = (this->now() - last_command_time_).seconds();
+
+    if (since_last_command > command_timeout_s_ && !command_watchdog_triggered_) {
+      command_watchdog_triggered_ = true;
+      for (auto & [motor_id, motor] : motors_) {
+        safeStop(*motor, motor_id, last_kd_[motor_id]);
+      }
+    }
+
+    for (const auto & [motor_id, motor] : motors_) {
+      cubemars::MotorState state;
+      const auto error = motor->readState(state);
+
+      if (error != cubemars::Error::none || !state.valid) {
+        consecutive_failures_[motor_id]++;
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 1000,
+          "Motor %u read failed (%d in a row): %s",
+          motor_id, consecutive_failures_[motor_id], motor->lastErrorMessage().c_str());
+
+        if (consecutive_failures_[motor_id] == max_consecutive_failures_) {
+          safeStop(*motor, motor_id, last_kd_[motor_id]);
+        }
+        continue;
+      }
+      consecutive_failures_[motor_id] = 0;
+
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Motor %u | Position: %.3f rad | Velocity: %.3f rad/s | Torque: %.3f Nm | Temp: %.1f C",
+        motor_id,
+        state.position_rad,
+        state.velocity_rad_per_s,
+        state.torque_nm,
+        state.temperature_c);
+
+      ak_motor_driver::msg::MotorState motor_state;
+      motor_state.motor_id = state.motor_id;
+      motor_state.position_rad = state.position_rad;
+      motor_state.velocity_rad_per_s = state.velocity_rad_per_s;
+      motor_state.torque_nm = state.torque_nm;
+      motor_state.temperature_c = state.temperature_c;
+      motor_state.error = state.error;
+      motor_state.valid = state.valid;
+
+      msg.states.push_back(motor_state);
+    }
+
+    if (!msg.states.empty()) {
+      state_pub_->publish(msg);
+    }
   }
-}
 
   std::unordered_map<std::uint8_t, std::unique_ptr<cubemars::CubeMarsMotor>> motors_;
   std::unordered_map<std::uint8_t, double> last_kd_;
+  std::unordered_map<std::uint8_t, int> consecutive_failures_;
   rclcpp::Subscription<MotorCommandArray>::SharedPtr command_sub_;
   rclcpp::Publisher<MotorStateArray>::SharedPtr state_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Service<EnterMitMode>::SharedPtr enter_mit_service_;
+  double command_timeout_s_;
+  int max_consecutive_failures_;
+  rclcpp::Time last_command_time_;
+  bool command_watchdog_triggered_{false};
 };
 
 int main(int argc, char ** argv)
