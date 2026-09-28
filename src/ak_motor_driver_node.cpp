@@ -29,7 +29,7 @@ public:
   {
     this->declare_parameter("can_interface", "can0");
     this->declare_parameter("motor_ids", std::vector<int64_t>{1});
-    this->declare_parameter("publish_rate_hz", 50.0);
+    this->declare_parameter("publish_rate_hz", 100.0);
     this->declare_parameter("kd", 1.0);
     this->declare_parameter("command_timeout_s", 0.5);
     this->declare_parameter("max_consecutive_failures", 5);
@@ -44,18 +44,70 @@ public:
 
     for (const auto & motor_id : motor_ids) {
       const auto id = static_cast<std::uint8_t>(motor_id);
+      RCLCPP_INFO(this->get_logger(),"Initializing motor %u on CAN interface %s", id, can_interface.c_str());
       motors_[id] = std::make_unique<cubemars::CubeMarsMotor>(can_interface, id);
       auto & motor = *motors_[id];
-      if (motor.connect() != cubemars::Error::none) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to connect motor %u on %s", id, can_interface.c_str());
-      }
-      if (motor.enterMitMode() != cubemars::Error::none) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to enter MIT mode for motor %u", id);
-      }
-      motor.setZero();
-      last_kd_[id] = kd;
-    }
-  
+      RCLCPP_INFO(this->get_logger(),"Connecting to motor %u on %s", id);
+      const auto connect_result = motor.connect();
+      if (connect_result != cubemars::Error::none) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to connect motor %u on %s: %s", id, can_interface.c_str(), motor.lastErrorMessage().c_str());
+        continue;
+         }
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Motor %u: CAN connection OK",
+    id);
+
+
+  // --------------------------------------------------
+  // STEP 2: Enter MIT mode
+  // --------------------------------------------------
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Motor %u: entering MIT mode...",
+    id);
+
+  const auto mit_result =
+    motor.enterMitMode();
+
+  if (mit_result != cubemars::Error::none) {
+
+    RCLCPP_ERROR(
+      this->get_logger(),
+      "Motor %u: failed to enter MIT mode: %s",
+      id,
+      motor.lastErrorMessage().c_str());
+
+    continue;
+  }
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Motor %u: MIT mode active",
+    id);
+
+
+  // --------------------------------------------------
+  // STEP 3: Give the driver time to enter MIT mode
+  // --------------------------------------------------
+
+  rclcpp::sleep_for(
+    std::chrono::milliseconds(200));
+
+
+  // --------------------------------------------------
+  // STEP 4: Motor ready
+  // --------------------------------------------------
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Motor %u: READY",
+    id);
+
+  last_kd_[id] = kd;
+}
     command_sub_ = this->create_subscription<MotorCommandArray>(
       "motor_commands",
       10,
