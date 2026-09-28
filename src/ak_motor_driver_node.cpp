@@ -5,8 +5,12 @@
 #include "cubemars.hpp"
 
 #include <chrono>
+#include <cerrno>
+#include <cstring>
 #include <memory>
+#include <net/if.h>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -42,20 +46,92 @@ public:
     max_consecutive_failures_ = this->get_parameter("max_consecutive_failures").as_int();
     last_command_time_ = this->now();
 
+    // Phase 1: CAN interface identified
+    const unsigned int if_index = if_nametoindex(can_interface.c_str());
+    if (if_index == 0) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "CAN interface %s: NOT found (%s)",
+        can_interface.c_str(), std::strerror(errno));
+    } else {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "CAN interface %s: identified (index %u)",
+        can_interface.c_str(), if_index);
+    }
+
+    // Initialize each motor through the phases
     for (const auto & motor_id : motor_ids) {
       const auto id = static_cast<std::uint8_t>(motor_id);
       motors_[id] = std::make_unique<cubemars::CubeMarsMotor>(can_interface, id);
       auto & motor = *motors_[id];
-      if (motor.connect() != cubemars::Error::none) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to connect motor %u on %s", id, can_interface.c_str());
-      }
-      if (motor.enterMitMode() != cubemars::Error::none) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to enter MIT mode for motor %u", id);
-      }
-      motor.setZero();
       last_kd_[id] = kd;
+
+      // Phase 2: Connected to CAN
+      RCLCPP_INFO(this->get_logger(), "Motor %u: connecting to CAN...", id);
+      const auto conn_err = motor.connect();
+      if (conn_err != cubemars::Error::none) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "Motor %u: CAN connection FAILED (%s)",
+          id, motor.lastErrorMessage().c_str());
+        continue;
+      }
+      RCLCPP_INFO(this->get_logger(), "Motor %u: CAN connection OK", id);
+
+      // Phase 3: Entering MIT mode
+      RCLCPP_INFO(this->get_logger(), "Motor %u: entering MIT mode...", id);
+      const auto mit_err = motor.enterMitMode();
+      if (mit_err != cubemars::Error::none) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "Motor %u: entering MIT mode FAILED (%s)",
+          id, motor.lastErrorMessage().c_str());
+        continue;
+      }
+      RCLCPP_INFO(this->get_logger(), "Motor %u: MIT mode active", id);
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      motor.setZero();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+      // Phase 4: Sending the first command
+      cubemars::MotorCommand initial_cmd{};
+      initial_cmd.position_rad = 0.0;
+      initial_cmd.velocity_rad_per_s = 0.0;
+      initial_cmd.kp = 0.0;
+      initial_cmd.kd = kd;
+      initial_cmd.torque_nm = 0.0;
+
+      RCLCPP_INFO(this->get_logger(), "Motor %u: sending first command...", id);
+      const auto cmd_err = motor.setMitCommand(initial_cmd);
+      if (cmd_err != cubemars::Error::none) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "Motor %u: sending first command FAILED (%s)",
+          id, motor.lastErrorMessage().c_str());
+      }
+
+      // Phase 5: Received command / response
+      cubemars::MotorState initial_state{};
+      const auto read_err = motor.readState(initial_state);
+      if (read_err != cubemars::Error::none || !initial_state.valid) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Motor %u: response not received (%s)",
+          id, motor.lastErrorMessage().c_str());
+      } else {
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Motor %u: response received (pos=%.3f rad, vel=%.3f rad/s, torque=%.3f Nm, temp=%.1f C)",
+          id, initial_state.position_rad, initial_state.velocity_rad_per_s,
+          initial_state.torque_nm, initial_state.temperature_c);
+      }
+
+      RCLCPP_INFO(this->get_logger(), "Motor %u: READY", id);
     }
   
+    // Phase 6: Publishing on motor
     command_sub_ = this->create_subscription<MotorCommandArray>(
       "motor_commands",
       10,
@@ -67,6 +143,11 @@ public:
     timer_ = this->create_wall_timer(
       std::chrono::duration<double>(1.0 / publish_rate_hz),
       std::bind(&AkMotorDriverNode::publishState, this));
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Publishing on motor: 'motor_states' ready at %.1f Hz",
+      publish_rate_hz);
 
     enter_mit_service_ = this->create_service<EnterMitMode>(
       "enter_mit_mode",
