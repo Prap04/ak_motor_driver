@@ -163,6 +163,8 @@ Error CubeMarsMotor::connect()
   if (socket_fd_ < 0) {
     return fail(Error::socket_create_failed, std::strerror(errno));
   }
+  int loopback=0;
+  setsockopt(socket_fd_,SOL_CAN_RAW,CAN_RAW_LOOPBACK,&loopback,sizeof(loopback));
 
   ifreq interface_request{};
   std::strncpy(interface_request.ifr_name, can_interface_.c_str(), IFNAMSIZ - 1);
@@ -170,8 +172,7 @@ Error CubeMarsMotor::connect()
     close(socket_fd_);
     socket_fd_ = -1;
     return fail(Error::interface_lookup_failed, std::strerror(errno));
-  }
-
+  }CAN_RAW_LOOPBACK
   sockaddr_can address{};
   address.can_family = AF_CAN;
   address.can_ifindex = interface_request.ifr_ifindex;
@@ -238,37 +239,41 @@ Error CubeMarsMotor::readState(MotorState & state)
     state.valid = false;
     return fail(Error::not_connected, "CAN socket is not open");
   }
-  pollfd descriptor{socket_fd_, POLLIN, 0};
-  const int poll_result = poll(&descriptor, 1, receive_timeout_ms_);
-  if (poll_result == 0) {
-    state.valid = false;
-    return fail(Error::timeout, "Timed out waiting for MIT feedback");
-  }
-  if (poll_result < 0) {
-    state.valid = false;
-    return fail(Error::receive_failed, std::strerror(errno));
+  can_frame latest_frame{};
+  bool got_any = false;
+
+  while(true){
+    pollfd descriptor{socket_fd_,POLLIN,0};
+    const int poll_result = poll(&descriptor, 1,got_any ? 0:receive_timeout_ms_);
+    if (poll_result<=0){
+      break;
+    }
+    can_frame frame{};
+    if(read(socket_fd_,&frame,sizeof(frame))!=static_cast<ssize_t>(sizeof(frame))) {
+      break;
+    }
+    latest_frame=frame;
+    got_any=true;
   }
 
-  can_frame frame{};
-  if (read(socket_fd_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
-    state.valid = false;
-    return fail(Error::receive_failed, std::strerror(errno));
+  if (!got_any){
+    state.valid=false;
+    return fail(Error::timeout,"Timed out waiting for MIT feedback");
   }
-  if ((frame.can_id & CAN_EFF_FLAG) != 0) {
+  if ((latest_frame.can_id & CAN_EFF_FLAG) != 0) {
     state.valid = false;
     return fail(Error::malformed_frame, "MIT feedback must use a standard CAN frame");
   }
-  if ((frame.can_id & CAN_SFF_MASK) != motor_id_) {
+  if ((latest_frame.can_id & CAN_SFF_MASK) != motor_id_) {
     state.valid = false;
     return fail(Error::unexpected_can_id, "Feedback CAN ID does not match motor ID");
-  }
-  if (frame.can_dlc != kDlc) {
+  } 
+  if (()latest_frame.can_dlc != kDlc) {
     state.valid = false;
     return fail(Error::unexpected_dlc, "MIT feedback DLC is not 8");
   }
-
   std::array<std::uint8_t, 8> data{};
-  std::copy(frame.data, frame.data + kDlc, data.begin());
+  std::copy(latest_frame.data, latest_frame.data + kDlc, data.begin());
   if (!decodeMitFeedback(data, motor_id_, limits_, state)) {
     state.valid = false;
     return fail(Error::malformed_frame, "Feedback motor ID does not match configured motor");
