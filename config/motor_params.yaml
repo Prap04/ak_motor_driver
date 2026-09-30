@@ -1,0 +1,7 @@
+/** 
+ros__parameters:
+  can_interface: "can0"
+  motor_ids: [1]
+  publish_rate_hz: 100
+  kd: 1.0
+  

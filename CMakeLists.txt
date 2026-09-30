@@ -64,6 +64,10 @@ if(AK_BUILD_ROS2)
   install(TARGETS cubemars_ros2_control DESTINATION lib)
 endif()
 install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}/
+  FILES_MATCHING PATTERN "*.yaml"
+)
 install(FILES cubemars_plugin.xml DESTINATION share/${PROJECT_NAME})
 
 ament_export_dependencies(rosidl_default_runtime)
