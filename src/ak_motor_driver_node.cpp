@@ -23,6 +23,7 @@ namespace
 constexpr std::uint8_t kModePosition = 0;
 constexpr std::uint8_t kModeVelocity = 1;
 constexpr std::uint8_t kModeTorque = 2;
+constexpr std::uint8_t kModeFull=3;
 }
 
 class AkMotorDriverNode : public rclcpp::Node
@@ -195,6 +196,16 @@ private:
         case kModeTorque:
           it->second->setTorque(command.torque_nm);
           break;
+        case kModeFull:{
+          cubemars::MotorCommand cmd{};
+          cmd.position_rad=command.position_rad;
+          cmd.velocity_rad_per_s=command.velocity_rad_per_s;
+          cmd.kp=command.kp;
+          cmd.kd=command.kd;
+          cmd.torque_nm=command.torque_nm;
+          it->second->setMitCommand(cmd);
+          break;
+        }
         default:
           RCLCPP_WARN(this->get_logger(), "Unknown mode %u for motor %u", command.mode, motor_id);
           break;
