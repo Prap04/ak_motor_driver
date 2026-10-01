@@ -3,6 +3,7 @@
 uint8 MODE_POSITION=0
 uint8 MODE_VELOCITY=1
 uint8 MODE_TORQUE=2
+uint8 MODE_FULL=3
 
 uint8 motor_id
 uint8 mode
